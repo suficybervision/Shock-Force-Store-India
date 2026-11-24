@@ -1,6 +1,17 @@
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { onAuthStateChanged, signInWithPopup, signOut, User } from 'firebase/auth';
-import { doc, serverTimestamp, setDoc } from 'firebase/firestore';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  orderBy,
+  query,
+  serverTimestamp,
+  setDoc,
+  writeBatch,
+} from 'firebase/firestore';
 import {
   CheckCircle2,
   Download,
@@ -17,15 +28,26 @@ import {
   auth,
   db,
   googleProvider,
-  handleFirestoreError,
-  OperationType,
 } from '../lib/firebase';
+import {
+  BOOTSTRAPPED_ADMIN_EMAIL,
+  compressImageToDataUrl,
+  fetchStorefrontFromFirestore,
+  isJsonResponse,
+  mapFirestoreAuditDoc,
+  mapFirestoreOrderDoc,
+  timestampToIso,
+  toTrackingInfo,
+} from '../lib/orderService';
 import {
   AuditLogEntry,
   calculateDeliveryCharge,
+  DEFAULT_PRODUCT,
+  DEFAULT_SETTINGS,
   formatInr,
   LaunchLead,
   OrderRecord,
+  OrderStatus,
   ProductData,
   StorefrontSettings,
   VALIDATION_PATTERNS,
@@ -38,6 +60,13 @@ interface AdminDashboardProps {
 }
 
 type AdminTab = 'orders' | 'settings' | 'audit';
+
+function escapeCsvCell(value: unknown): string {
+  const str = String(value ?? '');
+  const formulaSafe = /^[=+\-@]/.test(str) ? `'${str}` : str;
+  const escaped = formulaSafe.replace(/"/g, '""');
+  return `"${escaped}"`;
+}
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpdated }) => {
   const [user, setUser] = useState<User | null>(auth.currentUser);
@@ -89,66 +118,58 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
     return () => unsub();
   }, []);
 
-  const syncToFirestore = useCallback(
+  const seedMissingOrdersToFirestore = useCallback(
     async (
       currentUser: User,
+      expressOrders: OrderRecord[],
+      existingFsIds: Set<string>,
       product: ProductData,
-      settings: StorefrontSettings,
-      orderList: OrderRecord[],
-      logs: AuditLogEntry[],
-      leads: LaunchLead[] = []
+      settings: StorefrontSettings
     ) => {
       try {
-        await setDoc(
-          doc(db, 'adminUsers', currentUser.uid),
-          {
-            uid: currentUser.uid,
-            email: currentUser.email || '',
-            displayName: currentUser.displayName || 'Admin',
-            role: 'admin',
-            active: true,
-            createdAt: serverTimestamp(),
+        if (currentUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase()) {
+          await setDoc(
+            doc(db, 'adminUsers', currentUser.uid),
+            {
+              uid: currentUser.uid,
+              email: currentUser.email || '',
+              displayName: currentUser.displayName || 'Admin',
+              role: 'admin',
+              active: true,
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            },
+            { merge: true }
+          );
+        }
+      } catch {
+        // Ignore if secondary admin
+      }
+
+      try {
+        const prodSnap = await getDoc(doc(db, 'products', product.id));
+        if (!prodSnap.exists()) {
+          await setDoc(doc(db, 'products', product.id), {
+            ...product,
             updatedAt: serverTimestamp(),
-          },
-          { merge: true }
-        );
-      } catch (err) {
-        try {
-          handleFirestoreError(err, OperationType.WRITE, `adminUsers/${currentUser.uid}`);
-        } catch {
-          // Non-fatal if non-bootstrapped secondary admin
+          });
         }
+        const setSnap = await getDoc(doc(db, 'settings', 'storefront'));
+        if (!setSnap.exists()) {
+          await setDoc(doc(db, 'settings', 'storefront'), {
+            ...settings,
+            updatedAt: serverTimestamp(),
+          });
+        }
+      } catch {
+        // Non-fatal seeding
       }
 
-      try {
-        await setDoc(doc(db, 'products', product.id), {
-          ...product,
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
+      for (const ord of expressOrders.slice(0, 20)) {
+        if (existingFsIds.has(ord.orderId)) continue;
         try {
-          handleFirestoreError(err, OperationType.WRITE, `products/${product.id}`);
-        } catch {
-          // Handled via server state
-        }
-      }
-
-      try {
-        await setDoc(doc(db, 'settings', 'storefront'), {
-          ...settings,
-          updatedAt: serverTimestamp(),
-        });
-      } catch (err) {
-        try {
-          handleFirestoreError(err, OperationType.WRITE, 'settings/storefront');
-        } catch {
-          // Handled via server state
-        }
-      }
-
-      for (const ord of orderList.slice(0, 25)) {
-        try {
-          await setDoc(doc(db, 'orders', ord.orderId), {
+          const batch = writeBatch(db);
+          batch.set(doc(db, 'orders', ord.orderId), {
             orderId: ord.orderId,
             customerUid: ord.customerUid || 'guest',
             customerName: ord.customerName,
@@ -176,30 +197,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
             createdAt: serverTimestamp(),
             updatedAt: serverTimestamp(),
           });
-        } catch {
-          // Continue syncing remaining orders
-        }
-      }
-
-      for (const log of logs.slice(0, 20)) {
-        try {
-          await setDoc(doc(db, 'auditLogs', log.id), {
-            ...log,
+          batch.set(doc(db, 'orderTracking', ord.orderId), {
+            ...toTrackingInfo(ord),
             createdAt: serverTimestamp(),
+            updatedAt: serverTimestamp(),
           });
+          await batch.commit();
         } catch {
-          // Audit logs are immutable once written
-        }
-      }
-
-      for (const lead of leads.slice(0, 30)) {
-        try {
-          await setDoc(doc(db, 'launchLeads', lead.id), {
-            ...lead,
-            createdAt: serverTimestamp(),
-          });
-        } catch {
-          // Leads are immutable once written
+          // Continue remaining seeds
         }
       }
     },
@@ -212,47 +217,195 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
       setAuthError('');
       try {
         const token = await currentUser.getIdToken();
-        const verifyRes = await fetch('/api/admin/me', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (!verifyRes.ok) {
-          const errBody = (await verifyRes.json()) as { error?: string };
-          setAuthorized(false);
-          setAuthError(errBody.error || 'Access denied. Unauthorized Google account.');
-          setLoadingData(false);
-          return;
+
+        // 1. Verify admin status via Express API if available, otherwise verify via Firebase Auth + adminUsers
+        let expressAvailable = false;
+        try {
+          const verifyRes = await fetch('/api/admin/me', {
+            headers: { Authorization: `Bearer ${token}` },
+          });
+          if (isJsonResponse(verifyRes)) {
+            expressAvailable = true;
+            if (!verifyRes.ok) {
+              const errBody = (await verifyRes.json()) as { error?: string };
+              setAuthorized(false);
+              setAuthError(errBody.error || 'Access denied. Unauthorized Google account.');
+              setLoadingData(false);
+              return;
+            }
+          }
+        } catch {
+          expressAvailable = false;
         }
+
+        if (!expressAvailable) {
+          const isBootstrapped =
+            currentUser.emailVerified &&
+            currentUser.email?.toLowerCase() === BOOTSTRAPPED_ADMIN_EMAIL.toLowerCase();
+          let isSecondaryAdmin = false;
+          if (!isBootstrapped && currentUser.emailVerified) {
+            try {
+              const adminSnap = await getDoc(doc(db, 'adminUsers', currentUser.uid));
+              isSecondaryAdmin =
+                adminSnap.exists() &&
+                adminSnap.data().active === true &&
+                adminSnap.data().role === 'admin';
+            } catch {
+              isSecondaryAdmin = false;
+            }
+          }
+          if (!isBootstrapped && !isSecondaryAdmin) {
+            setAuthorized(false);
+            setAuthError(
+              'Unauthorized account. Only explicitly authorized admin accounts can access this panel.'
+            );
+            setLoadingData(false);
+            return;
+          }
+        }
+
         setAuthorized(true);
 
-        const dataRes = await fetch('/api/admin/orders', {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (dataRes.ok) {
-          const payload = (await dataRes.json()) as {
-            orders: OrderRecord[];
-            auditLogs: AuditLogEntry[];
-            reviews: VerifiedReview[];
-            launchLeads?: LaunchLead[];
-            product: ProductData;
-            settings: StorefrontSettings;
-          };
-          setOrders(payload.orders);
-          setAuditLogs(payload.auditLogs);
-          setReviews(payload.reviews);
-          setLaunchLeads(payload.launchLeads || []);
-          setProductDraft(payload.product);
-          setSettingsDraft(payload.settings);
-          setComplianceChecklistConfirmed(payload.settings.safetyComplianceApproved);
-          onStorefrontUpdated(payload.product, payload.settings);
-          void syncToFirestore(
-            currentUser,
-            payload.product,
-            payload.settings,
-            payload.orders,
-            payload.auditLogs,
-            payload.launchLeads || []
-          );
+        // 2. Fetch from Express (if available) + Cloud Firestore in parallel
+        let expressOrders: OrderRecord[] = [];
+        let expressLogs: AuditLogEntry[] = [];
+        let expressReviews: VerifiedReview[] = [];
+        let expressLeads: LaunchLead[] = [];
+        let expressProduct: ProductData | null = null;
+        let expressSettings: StorefrontSettings | null = null;
+
+        if (expressAvailable) {
+          try {
+            const dataRes = await fetch('/api/admin/orders', {
+              headers: { Authorization: `Bearer ${token}` },
+            });
+            if (dataRes.ok && isJsonResponse(dataRes)) {
+              const payload = (await dataRes.json()) as {
+                orders: OrderRecord[];
+                auditLogs: AuditLogEntry[];
+                reviews: VerifiedReview[];
+                launchLeads?: LaunchLead[];
+                product: ProductData;
+                settings: StorefrontSettings;
+              };
+              expressOrders = payload.orders || [];
+              expressLogs = payload.auditLogs || [];
+              expressReviews = payload.reviews || [];
+              expressLeads = payload.launchLeads || [];
+              expressProduct = payload.product;
+              expressSettings = payload.settings;
+            }
+          } catch {
+            // Fall back cleanly to Firestore
+          }
         }
+
+        const [fsOrdersSnap, fsLogsSnap, fsReviewsSnap, fsLeadsSnap, fsStorefront] =
+          await Promise.all([
+            getDocs(
+              query(collection(db, 'orders'), orderBy('createdAt', 'desc'), limit(200))
+            ).catch(() => null),
+            getDocs(
+              query(collection(db, 'auditLogs'), orderBy('createdAt', 'desc'), limit(200))
+            ).catch(() => null),
+            getDocs(
+              query(collection(db, 'reviews'), orderBy('createdAt', 'desc'), limit(100))
+            ).catch(() => null),
+            getDocs(
+              query(collection(db, 'launchLeads'), orderBy('createdAt', 'desc'), limit(100))
+            ).catch(() => null),
+            fetchStorefrontFromFirestore(),
+          ]);
+
+        const fsOrders: OrderRecord[] = fsOrdersSnap
+          ? fsOrdersSnap.docs.map((d) =>
+              mapFirestoreOrderDoc(d.id, d.data() as Record<string, unknown>)
+            )
+          : [];
+        const fsOrderIds = new Set(fsOrders.map((o) => o.orderId));
+
+        // Merge Express + Firestore orders (prefer record with newer updatedAt)
+        const orderMap = new Map<string, OrderRecord>();
+        for (const o of expressOrders) orderMap.set(o.orderId, o);
+        for (const fo of fsOrders) {
+          const existing = orderMap.get(fo.orderId);
+          if (!existing || fo.updatedAt >= existing.updatedAt) {
+            orderMap.set(fo.orderId, fo);
+          }
+        }
+        const mergedOrders = Array.from(orderMap.values()).sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt)
+        );
+
+        const fsLogs: AuditLogEntry[] = fsLogsSnap
+          ? fsLogsSnap.docs.map((d) =>
+              mapFirestoreAuditDoc(d.id, d.data() as Record<string, unknown>)
+            )
+          : [];
+        const logMap = new Map<string, AuditLogEntry>();
+        for (const l of [...expressLogs, ...fsLogs]) logMap.set(l.id, l);
+        const mergedLogs = Array.from(logMap.values()).sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt)
+        );
+
+        const fsReviews: VerifiedReview[] = fsReviewsSnap
+          ? fsReviewsSnap.docs.map((d) => {
+              const r = d.data() as Record<string, unknown>;
+              return {
+                id: String(r.id || d.id),
+                orderId: String(r.orderId || ''),
+                customerName: String(r.customerName || 'Verified Buyer'),
+                rating: Number(r.rating || 5),
+                comment: String(r.comment || ''),
+                verifiedPurchase: Boolean(r.verifiedPurchase),
+                approved: Boolean(r.approved),
+                createdAt: timestampToIso(r.createdAt),
+              };
+            })
+          : [];
+        const revMap = new Map<string, VerifiedReview>();
+        for (const r of [...expressReviews, ...fsReviews]) revMap.set(r.id, r);
+        const mergedReviews = Array.from(revMap.values()).sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt)
+        );
+
+        const fsLeads: LaunchLead[] = fsLeadsSnap
+          ? fsLeadsSnap.docs.map((d) => {
+              const l = d.data() as Record<string, unknown>;
+              return {
+                id: String(l.id || d.id),
+                name: String(l.name || ''),
+                phone: String(l.phone || ''),
+                consent: Boolean(l.consent),
+                createdAt: timestampToIso(l.createdAt),
+              };
+            })
+          : [];
+        const leadMap = new Map<string, LaunchLead>();
+        for (const l of [...expressLeads, ...fsLeads]) leadMap.set(l.id, l);
+        const mergedLeads = Array.from(leadMap.values()).sort((a, b) =>
+          b.createdAt.localeCompare(a.createdAt)
+        );
+
+        const activeProduct = fsStorefront.product || expressProduct || DEFAULT_PRODUCT;
+        const activeSettings = fsStorefront.settings || expressSettings || DEFAULT_SETTINGS;
+
+        setOrders(mergedOrders);
+        setAuditLogs(mergedLogs);
+        setReviews(mergedReviews);
+        setLaunchLeads(mergedLeads);
+        setProductDraft(activeProduct);
+        setSettingsDraft(activeSettings);
+        setComplianceChecklistConfirmed(activeSettings.safetyComplianceApproved);
+        onStorefrontUpdated(activeProduct, activeSettings);
+
+        void seedMissingOrdersToFirestore(
+          currentUser,
+          expressOrders,
+          fsOrderIds,
+          activeProduct,
+          activeSettings
+        );
       } catch {
         setAuthorized(false);
         setAuthError('Failed to verify admin session.');
@@ -260,7 +413,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
         setLoadingData(false);
       }
     },
-    [onStorefrontUpdated, syncToFirestore]
+    [onStorefrontUpdated, seedMissingOrdersToFirestore]
   );
 
   useEffect(() => {
@@ -269,7 +422,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
     }
   }, [authReady, user, loadAdminWorkspace]);
 
-  // Fetch private payment proof image securely with Bearer token
+  // Fetch private payment proof image securely (supports both data URL in Firestore & Express route)
   useEffect(() => {
     let active = true;
     let currentUrl = '';
@@ -285,6 +438,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
       setTrackingId(selectedOrder.trackingId || '');
 
       if (!selectedOrder.paymentProofPath || !user) return;
+
+      if (selectedOrder.paymentProofPath.startsWith('data:image/')) {
+        setProofObjectUrl(selectedOrder.paymentProofPath);
+        return;
+      }
+
       setLoadingProof(true);
       try {
         const token = await user.getIdToken();
@@ -293,9 +452,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
           { headers: { Authorization: `Bearer ${token}` } }
         );
         if (res.ok && active) {
-          const blob = await res.blob();
-          currentUrl = URL.createObjectURL(blob);
-          setProofObjectUrl(currentUrl);
+          const ct = res.headers.get('content-type') || '';
+          if (ct.startsWith('image/')) {
+            const blob = await res.blob();
+            currentUrl = URL.createObjectURL(blob);
+            setProofObjectUrl(currentUrl);
+          }
         }
       } catch {
         // Ignore preview load error
@@ -363,40 +525,220 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
     orderId: string,
     payload: Record<string, unknown>
   ) => {
-    if (!user || orderActionBusy) return;
+    if (!user || !selectedOrder || orderActionBusy) return;
     setOrderActionBusy(true);
     setOrderActionMsg('');
+
     try {
-      const token = await user.getIdToken();
-      const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}`, {
-        method: 'PATCH',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify(payload),
-      });
-      const data = (await res.json()) as {
-        order?: OrderRecord;
-        auditLog?: AuditLogEntry;
-        error?: string;
-      };
-      if (!res.ok || !data.order) {
-        setOrderActionMsg(data.error || 'Failed to update order.');
-      } else {
-        const updated = data.order;
-        setOrders((prev) => prev.map((o) => (o.orderId === orderId ? updated : o)));
-        setSelectedOrder(updated);
-        if (data.auditLog) {
-          setAuditLogs((prev) => [data.auditLog!, ...prev]);
+      let updatedOrder: OrderRecord | null = null;
+      let logEntry: AuditLogEntry | null = null;
+
+      // 1. Try Express API if available
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch(`/api/admin/orders/${encodeURIComponent(orderId)}`, {
+          method: 'PATCH',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify(payload),
+        });
+        if (isJsonResponse(res)) {
+          const data = (await res.json()) as {
+            order?: OrderRecord;
+            auditLog?: AuditLogEntry;
+            error?: string;
+          };
+          if (!res.ok) {
+            if (res.status !== 404) {
+              setOrderActionMsg(data.error || 'Failed to update order.');
+              setOrderActionBusy(false);
+              return;
+            }
+          } else if (data.order) {
+            updatedOrder = data.order;
+            logEntry = data.auditLog || null;
+          }
         }
-        setOrderActionMsg('Order updated and logged to audit trail.');
-        if (productDraft && settingsDraft) {
-          void syncToFirestore(user, productDraft, settingsDraft, [updated], data.auditLog ? [data.auditLog] : []);
-        }
+      } catch {
+        // Fall through to direct Firestore mutation
       }
-    } catch {
-      setOrderActionMsg('Network error updating order.');
+
+      // 2. Compute authoritative transition if Express didn't run (Vercel)
+      const nowIso = new Date().toISOString();
+      if (!updatedOrder) {
+        const action = typeof payload.action === 'string' ? payload.action : '';
+        const next: OrderRecord = { ...selectedOrder, updatedAt: nowIso };
+        let logAction = '';
+        let logDetails = '';
+
+        if (action === 'APPROVE_PAYMENT') {
+          if (payload.bankConfirmed !== true) {
+            setOrderActionMsg(
+              'You must explicitly confirm actual bank/UPI credit before approving payment.'
+            );
+            setOrderActionBusy(false);
+            return;
+          }
+          next.status = 'APPROVED';
+          next.paymentVerified = true;
+          next.rejectionReason = '';
+          logAction = 'APPROVE_PAYMENT';
+          logDetails = `Approved payment after bank/UPI verification (UTR: ${selectedOrder.utrNumber || 'N/A'}, ₹${selectedOrder.totalInr}).`;
+        } else if (action === 'REJECT_PAYMENT') {
+          const reason =
+            typeof payload.rejectionReason === 'string' ? payload.rejectionReason.trim() : '';
+          if (reason.length < 4 || reason.length > 300) {
+            setOrderActionMsg('Please provide a clear rejection reason (4–300 characters).');
+            setOrderActionBusy(false);
+            return;
+          }
+          next.status = 'REJECTED';
+          next.paymentVerified = false;
+          next.rejectionReason = reason;
+          logAction = 'REJECT_PAYMENT';
+          logDetails = `Rejected payment: ${reason}`;
+        } else if (action === 'UPDATE_FULFILLMENT') {
+          const nextStatus =
+            typeof payload.status === 'string' ? (payload.status as OrderStatus) : selectedOrder.status;
+          if (!['APPROVED', 'SHIPPED', 'DELIVERED'].includes(nextStatus)) {
+            setOrderActionMsg('Invalid fulfillment status.');
+            setOrderActionBusy(false);
+            return;
+          }
+          if (!selectedOrder.paymentVerified) {
+            setOrderActionMsg(
+              'Cannot ship or mark delivered before manual payment verification is approved.'
+            );
+            setOrderActionBusy(false);
+            return;
+          }
+          const cName =
+            typeof payload.courierName === 'string'
+              ? payload.courierName.trim().slice(0, 80)
+              : selectedOrder.courierName;
+          const tId =
+            typeof payload.trackingId === 'string'
+              ? payload.trackingId.trim().slice(0, 80)
+              : selectedOrder.trackingId;
+          if (nextStatus === 'SHIPPED' && (!cName || !tId)) {
+            setOrderActionMsg('Courier name and tracking ID are required to mark Shipped.');
+            setOrderActionBusy(false);
+            return;
+          }
+          next.status = nextStatus;
+          next.courierName = cName;
+          next.trackingId = tId;
+          logAction = `STATUS_${nextStatus}`;
+          logDetails = `Updated status to ${nextStatus}${cName ? ` (${cName} · ${tId})` : ''}.`;
+        } else {
+          setOrderActionMsg('Unknown admin order action.');
+          setOrderActionBusy(false);
+          return;
+        }
+
+        updatedOrder = next;
+        logEntry = {
+          id: `LOG-${Date.now().toString(36).toUpperCase()}`,
+          action: logAction,
+          targetOrderId: orderId,
+          actorUid: user.uid,
+          actorEmail: user.email || BOOTSTRAPPED_ADMIN_EMAIL,
+          details: logDetails,
+          createdAt: nowIso,
+        };
+      }
+
+      // 3. Persist atomically to Firestore (/orders/{id}, /orderTracking/{id}, /auditLogs/{id})
+      const orderRef = doc(db, 'orders', orderId);
+      const trackingRef = doc(db, 'orderTracking', orderId);
+      const trackingInfo = toTrackingInfo(updatedOrder);
+      const orderSnap = await getDoc(orderRef);
+
+      const batch = writeBatch(db);
+      if (orderSnap.exists()) {
+        batch.update(orderRef, {
+          status: updatedOrder.status,
+          paymentVerified: updatedOrder.paymentVerified,
+          rejectionReason: updatedOrder.rejectionReason || '',
+          courierName: updatedOrder.courierName || '',
+          trackingId: updatedOrder.trackingId || '',
+          updatedAt: serverTimestamp(),
+        });
+        batch.update(trackingRef, {
+          status: trackingInfo.status,
+          paymentVerified: trackingInfo.paymentVerified,
+          paymentStatus: trackingInfo.paymentStatus,
+          orderStatus: trackingInfo.orderStatus,
+          shippingStatus: trackingInfo.shippingStatus,
+          courierName: trackingInfo.courierName,
+          trackingId: trackingInfo.trackingId,
+          rejectionReason: trackingInfo.rejectionReason,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
+        batch.set(orderRef, {
+          orderId: updatedOrder.orderId,
+          customerUid: updatedOrder.customerUid || 'guest',
+          customerName: updatedOrder.customerName,
+          phone: updatedOrder.phone,
+          state: updatedOrder.state,
+          city: updatedOrder.city,
+          pinCode: updatedOrder.pinCode,
+          address: updatedOrder.address,
+          landmark: updatedOrder.landmark || '',
+          productId: updatedOrder.productId,
+          productTitle: updatedOrder.productTitle,
+          unitPriceInr: updatedOrder.unitPriceInr,
+          quantity: updatedOrder.quantity,
+          subtotalInr: updatedOrder.subtotalInr,
+          deliveryChargeInr: updatedOrder.deliveryChargeInr,
+          totalInr: updatedOrder.totalInr,
+          status: updatedOrder.status,
+          paymentVerified: updatedOrder.paymentVerified,
+          utrNumber: updatedOrder.utrNumber || '',
+          paymentProofPath: updatedOrder.paymentProofPath || '',
+          paymentProofName: updatedOrder.paymentProofName || '',
+          rejectionReason: updatedOrder.rejectionReason || '',
+          courierName: updatedOrder.courierName || '',
+          trackingId: updatedOrder.trackingId || '',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+        batch.set(trackingRef, {
+          ...trackingInfo,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      if (logEntry) {
+        batch.set(doc(db, 'auditLogs', logEntry.id), {
+          id: logEntry.id,
+          action: logEntry.action,
+          targetOrderId: logEntry.targetOrderId,
+          actorUid: user.uid,
+          actorEmail: user.email || BOOTSTRAPPED_ADMIN_EMAIL,
+          details: logEntry.details,
+          createdAt: serverTimestamp(),
+        });
+      }
+
+      await batch.commit();
+
+      setOrders((prev) => prev.map((o) => (o.orderId === orderId ? updatedOrder! : o)));
+      setSelectedOrder(updatedOrder);
+      if (logEntry) {
+        setAuditLogs((prev) => [logEntry!, ...prev]);
+      }
+      setOrderActionMsg('Order updated and logged to audit trail.');
+    } catch (err) {
+      setOrderActionMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : 'Failed to save order update. Please retry.'
+      );
     } finally {
       setOrderActionBusy(false);
     }
@@ -404,12 +746,70 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
 
   const handleExportCsv = async () => {
     if (!user) return;
-    const token = await user.getIdToken();
-    const res = await fetch('/api/admin/export-csv', {
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return;
-    const blob = await res.blob();
+    let blob: Blob | null = null;
+    try {
+      const token = await user.getIdToken();
+      const res = await fetch('/api/admin/export-csv', {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      if (res.ok && (res.headers.get('content-type') || '').includes('text/csv')) {
+        blob = await res.blob();
+      }
+    } catch {
+      // Generate CSV directly from orders state
+    }
+
+    if (!blob) {
+      const headers = [
+        'Order ID',
+        'Date',
+        'Customer Name',
+        'Mobile',
+        'State',
+        'City',
+        'PIN Code',
+        'Address',
+        'Landmark',
+        'Quantity',
+        'Subtotal (INR)',
+        'Delivery (INR)',
+        'Total (INR)',
+        'Status',
+        'Payment Verified',
+        'UTR Number',
+        'Courier',
+        'Tracking ID',
+        'Rejection Reason',
+      ];
+      const rows = orders.map((o) =>
+        [
+          o.orderId,
+          o.createdAt,
+          o.customerName,
+          o.phone,
+          o.state,
+          o.city,
+          o.pinCode,
+          o.address,
+          o.landmark,
+          o.quantity,
+          o.subtotalInr,
+          o.deliveryChargeInr,
+          o.totalInr,
+          o.status,
+          o.paymentVerified ? 'YES' : 'NO',
+          o.utrNumber,
+          o.courierName,
+          o.trackingId,
+          o.rejectionReason,
+        ]
+          .map(escapeCsvCell)
+          .join(',')
+      );
+      const csv = [headers.map(escapeCsvCell).join(','), ...rows].join('\r\n');
+      blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    }
+
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -422,24 +822,46 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
 
   const handleProductImageUpload = async (file: File) => {
     if (!user || !productDraft) return;
-    const token = await user.getIdToken();
-    const formData = new FormData();
-    formData.append('file', file);
-    const res = await fetch('/api/admin/upload-asset', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-      body: formData,
-    });
-    const data = (await res.json()) as { url?: string; error?: string };
-    if (!res.ok || !data.url) {
-      setSettingsFeedback(data.error || 'Image upload failed.');
-      return;
+    setSettingsFeedback('');
+    try {
+      const token = await user.getIdToken();
+      const formData = new FormData();
+      formData.append('file', file);
+      const res = await fetch('/api/admin/upload-asset', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${token}` },
+        body: formData,
+      });
+      if (isJsonResponse(res)) {
+        const data = (await res.json()) as { url?: string; error?: string };
+        if (res.ok && data.url) {
+          setProductDraft({
+            ...productDraft,
+            images: [...productDraft.images, data.url].slice(0, 10),
+          });
+          setSettingsFeedback('Product photograph added. Click Save Settings to publish.');
+          return;
+        }
+      }
+    } catch {
+      // Fall back to compressed data URL for Cloud Firestore storage
     }
-    setProductDraft({
-      ...productDraft,
-      images: [...productDraft.images, data.url].slice(0, 10),
-    });
-    setSettingsFeedback('Product photograph added. Click Save Settings to publish.');
+
+    try {
+      const compressed = await compressImageToDataUrl(file, {
+        maxDimension: 900,
+        maxLength: 130000,
+      });
+      setProductDraft({
+        ...productDraft,
+        images: [...productDraft.images, compressed].slice(0, 10),
+      });
+      setSettingsFeedback('Product photograph compressed & added. Click Save Settings to publish.');
+    } catch (err) {
+      setSettingsFeedback(
+        err instanceof Error ? err.message : 'Image upload failed.'
+      );
+    }
   };
 
   const handleSaveSettings = async (e: React.FormEvent) => {
@@ -461,47 +883,93 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
     setSavingSettings(true);
     setSettingsFeedback('');
     try {
-      const token = await user.getIdToken();
+      const nowIso = new Date().toISOString();
       const cleanedSettings: StorefrontSettings = {
         ...settingsDraft,
         merchantUpiId: settingsDraft.merchantUpiId.trim(),
         upiQrImageUrl: '',
+        updatedAt: nowIso,
       };
-      const res = await fetch('/api/admin/settings', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          product: productDraft,
-          settings: cleanedSettings,
-        }),
-      });
-      const data = (await res.json()) as {
-        product?: ProductData;
-        settings?: StorefrontSettings;
-        auditLog?: AuditLogEntry;
-        error?: string;
-      };
-      if (!res.ok || !data.product || !data.settings) {
-        setSettingsFeedback(data.error || 'Could not save settings.');
-      } else {
-        setProductDraft(data.product);
-        setSettingsDraft(data.settings);
-        onStorefrontUpdated(data.product, data.settings);
-        if (data.auditLog) setAuditLogs((prev) => [data.auditLog!, ...prev]);
-        void syncToFirestore(
-          user,
-          data.product,
-          data.settings,
-          [],
-          data.auditLog ? [data.auditLog] : []
-        );
-        setSettingsFeedback('Settings saved to server and Cloud Firestore.');
+      let nextProduct: ProductData = { ...productDraft, updatedAt: nowIso };
+      let nextSettings: StorefrontSettings = cleanedSettings;
+      let logEntry: AuditLogEntry | null = null;
+
+      try {
+        const token = await user.getIdToken();
+        const res = await fetch('/api/admin/settings', {
+          method: 'PUT',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${token}`,
+          },
+          body: JSON.stringify({
+            product: productDraft,
+            settings: cleanedSettings,
+          }),
+        });
+        if (isJsonResponse(res)) {
+          const data = (await res.json()) as {
+            product?: ProductData;
+            settings?: StorefrontSettings;
+            auditLog?: AuditLogEntry;
+            error?: string;
+          };
+          if (!res.ok) {
+            setSettingsFeedback(data.error || 'Could not save settings.');
+            setSavingSettings(false);
+            return;
+          }
+          if (data.product && data.settings) {
+            nextProduct = data.product;
+            nextSettings = data.settings;
+            logEntry = data.auditLog || null;
+          }
+        }
+      } catch {
+        // Proceed with Firestore persistence
       }
-    } catch {
-      setSettingsFeedback('Network error saving settings.');
+
+      if (!logEntry) {
+        logEntry = {
+          id: `LOG-${Date.now().toString(36).toUpperCase()}`,
+          action: 'UPDATE_SETTINGS',
+          targetOrderId: '',
+          actorUid: user.uid,
+          actorEmail: user.email || BOOTSTRAPPED_ADMIN_EMAIL,
+          details: `Updated settings (Price: ₹${nextProduct.priceInr}, Delivery: ₹${nextSettings.flatDeliveryChargeInr}, UPI: ${nextSettings.merchantUpiId}).`,
+          createdAt: nowIso,
+        };
+      }
+
+      const batch = writeBatch(db);
+      batch.set(doc(db, 'products', nextProduct.id), {
+        ...nextProduct,
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(db, 'settings', 'storefront'), {
+        ...nextSettings,
+        updatedAt: serverTimestamp(),
+      });
+      batch.set(doc(db, 'auditLogs', logEntry.id), {
+        id: logEntry.id,
+        action: logEntry.action,
+        targetOrderId: logEntry.targetOrderId,
+        actorUid: user.uid,
+        actorEmail: user.email || BOOTSTRAPPED_ADMIN_EMAIL,
+        details: logEntry.details,
+        createdAt: serverTimestamp(),
+      });
+      await batch.commit();
+
+      setProductDraft(nextProduct);
+      setSettingsDraft(nextSettings);
+      onStorefrontUpdated(nextProduct, nextSettings);
+      setAuditLogs((prev) => [logEntry!, ...prev]);
+      setSettingsFeedback('Settings saved to Cloud Firestore.');
+    } catch (err) {
+      setSettingsFeedback(
+        err instanceof Error && err.message ? err.message : 'Failed to save settings.'
+      );
     } finally {
       setSavingSettings(false);
     }
@@ -509,17 +977,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
 
   const handleToggleReview = async (reviewId: string, approved: boolean) => {
     if (!user) return;
-    const token = await user.getIdToken();
-    const res = await fetch(`/api/admin/reviews/${encodeURIComponent(reviewId)}`, {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`,
-      },
-      body: JSON.stringify({ approved }),
-    });
-    if (res.ok) {
+    try {
+      const token = await user.getIdToken();
+      await fetch(`/api/admin/reviews/${encodeURIComponent(reviewId)}`, {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ approved }),
+      });
+    } catch {
+      // Ignore if static deployment
+    }
+
+    try {
+      const revRef = doc(db, 'reviews', reviewId);
+      const revSnap = await getDoc(revRef);
+      if (revSnap.exists()) {
+        await setDoc(revRef, { approved }, { merge: true });
+      }
       setReviews((prev) => prev.map((r) => (r.id === reviewId ? { ...r, approved } : r)));
+    } catch {
+      // Handled gracefully
     }
   };
 

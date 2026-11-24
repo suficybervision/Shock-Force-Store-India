@@ -8,6 +8,7 @@ import {
   VALIDATION_PATTERNS,
 } from '../types/store';
 import { TRANSLATIONS } from '../i18n/translations';
+import { submitReviewHybrid, toTrackingInfo, trackOrderHybrid } from '../lib/orderService';
 
 interface OrderLookupViewProps {
   initialOrder?: OrderRecord | null;
@@ -15,51 +16,6 @@ interface OrderLookupViewProps {
   justSubmitted?: boolean;
   language: Language;
   onRetryPayment: (order: OrderRecord, token: string) => void;
-}
-
-function toTrackingInfo(ord: OrderRecord): OrderTrackingInfo {
-  const paymentStatusMap: Record<OrderRecord['status'], string> = {
-    AWAITING_PAYMENT: 'Awaiting UPI Payment',
-    PENDING_VERIFICATION: 'Pending Verification',
-    APPROVED: 'Verified & Approved',
-    REJECTED: 'Rejected',
-    SHIPPED: 'Verified & Approved',
-    DELIVERED: 'Verified & Approved',
-  };
-  const orderStatusMap: Record<OrderRecord['status'], string> = {
-    AWAITING_PAYMENT: 'Pending',
-    PENDING_VERIFICATION: 'Pending',
-    APPROVED: 'Approved',
-    REJECTED: 'Rejected',
-    SHIPPED: 'Shipped',
-    DELIVERED: 'Delivered',
-  };
-  const shippingStatusMap: Record<OrderRecord['status'], string> = {
-    AWAITING_PAYMENT: 'Not Dispatched',
-    PENDING_VERIFICATION: 'Pending Payment Verification',
-    APPROVED: 'Preparing Dispatch',
-    REJECTED: 'Dispatch Cancelled',
-    SHIPPED: 'Shipped',
-    DELIVERED: 'Delivered',
-  };
-  return {
-    orderId: ord.orderId,
-    createdAt: ord.createdAt,
-    updatedAt: ord.updatedAt,
-    status: ord.status,
-    paymentVerified: ord.paymentVerified,
-    paymentStatus: paymentStatusMap[ord.status],
-    orderStatus: orderStatusMap[ord.status],
-    shippingStatus: shippingStatusMap[ord.status],
-    courierName: ord.courierName,
-    trackingId: ord.trackingId,
-    rejectionReason: ord.rejectionReason,
-    productTitle: ord.productTitle,
-    quantity: ord.quantity,
-    subtotalInr: ord.subtotalInr,
-    deliveryChargeInr: ord.deliveryChargeInr,
-    totalInr: ord.totalInr,
-  };
 }
 
 export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
@@ -100,27 +56,19 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
 
     setLoading(true);
     try {
-      const res = await fetch('/api/orders/lookup', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orderId: cleanOrderId }),
-      });
-      const data = (await res.json()) as {
-        order?: OrderTrackingInfo;
-        error?: string;
-      };
-      if (!res.ok || !data.order) {
+      const tracked = await trackOrderHybrid(cleanOrderId);
+      if (!tracked) {
         setTrackingInfo(null);
         setSessionOrder(null);
-        setErrorMsg(data.error || 'No order found with that Order ID.');
+        setErrorMsg('No order found with that Order ID.');
       } else {
-        setTrackingInfo(data.order);
-        if (sessionOrder && sessionOrder.orderId !== data.order.orderId) {
+        setTrackingInfo(tracked);
+        if (sessionOrder && sessionOrder.orderId !== tracked.orderId) {
           setSessionOrder(null);
         }
       }
     } catch {
-      setErrorMsg('Unable to track order right now.');
+      setErrorMsg('Unable to track order right now. Please try again.');
     } finally {
       setLoading(false);
     }
@@ -136,25 +84,18 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
     setSubmittingReview(true);
     setReviewMsg('');
     try {
-      const res = await fetch('/api/reviews', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          orderId: trackingInfo.orderId,
-          phone: reviewPhone.trim(),
-          rating,
-          comment: reviewComment.trim(),
-        }),
+      const message = await submitReviewHybrid({
+        orderId: trackingInfo.orderId,
+        phone: reviewPhone.trim(),
+        rating,
+        comment: reviewComment.trim(),
       });
-      const data = (await res.json()) as { message?: string; error?: string };
-      if (!res.ok) {
-        setReviewMsg(data.error || 'Could not submit review.');
-      } else {
-        setReviewMsg(data.message || 'Review submitted for admin approval.');
-        setReviewComment('');
-      }
-    } catch {
-      setReviewMsg('Network error submitting review.');
+      setReviewMsg(message);
+      setReviewComment('');
+    } catch (err) {
+      setReviewMsg(
+        err instanceof Error && err.message ? err.message : 'Could not submit review.'
+      );
     } finally {
       setSubmittingReview(false);
     }

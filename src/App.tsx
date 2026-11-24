@@ -1,5 +1,4 @@
 import React, { useCallback, useEffect, useState } from 'react';
-import { doc, getDoc } from 'firebase/firestore';
 import { ChevronDown, Clock, Minus, Plus, Star } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { AppView, StorefrontHeader } from './components/StorefrontHeader';
@@ -10,7 +9,7 @@ import { PaymentView } from './components/PaymentView';
 import { OrderLookupView } from './components/OrderLookupView';
 import { AdminDashboard } from './components/AdminDashboard';
 import { PolicyModal } from './components/PolicyModal';
-import { db } from './lib/firebase';
+import { fetchStorefrontFromFirestore, isJsonResponse } from './lib/orderService';
 import {
   calculateDeliveryCharge,
   DEFAULT_PRODUCT,
@@ -82,7 +81,7 @@ export default function App() {
   const loadStorefront = useCallback(async () => {
     try {
       const res = await fetch('/api/storefront');
-      if (res.ok) {
+      if (res.ok && isJsonResponse(res)) {
         const data = (await res.json()) as {
           product?: ProductData;
           settings?: StorefrontSettings;
@@ -97,43 +96,46 @@ export default function App() {
     }
 
     try {
-      const [prodSnap, setSnap] = await Promise.all([
-        getDoc(doc(db, 'products', 'shock-shoe')),
-        getDoc(doc(db, 'settings', 'storefront')),
-      ]);
-      if (prodSnap.exists()) {
-        const d = prodSnap.data() as ProductData;
-        const hasLegacyAiImages = d.images?.some((img) => img.startsWith('/src/assets/images/'));
-        if (d.title && typeof d.priceInr === 'number' && !hasLegacyAiImages) {
-          setProduct((prev) => ({ ...prev, ...d }));
-        }
+      const fsData = await fetchStorefrontFromFirestore();
+      if (fsData.product) {
+        setProduct((prev) => ({ ...prev, ...fsData.product! }));
       }
-      if (setSnap.exists()) {
-        const s = setSnap.data() as StorefrontSettings;
-        if (s.brandName && s.merchantUpiId) {
-          const isLegacyDisabledBanner =
-            s.announcementText?.includes('Checkout paused') ||
-            s.announcementText?.includes('Sales Paused') ||
-            s.announcementText?.includes('Launch Coming Soon') ||
-            s.announcementText?.includes('Payment collection disabled');
-          const cleanAnnouncement = isLegacyDisabledBanner
-            ? DEFAULT_SETTINGS.announcementText
-            : s.announcementText;
-          const cleanAnnouncementHi =
-            isLegacyDisabledBanner || s.announcementTextHi?.includes('चेकआउट बंद') || s.announcementTextHi?.includes('भुगतान बंद')
-              ? DEFAULT_SETTINGS.announcementTextHi
-              : s.announcementTextHi;
-          setSettings((prev) => ({
-            ...prev,
-            ...s,
-            safetyComplianceApproved: isLegacyDisabledBanner ? true : s.safetyComplianceApproved,
-            announcementText: cleanAnnouncement || prev.announcementText,
-            announcementTextHi: cleanAnnouncementHi || prev.announcementTextHi,
-          }));
-        }
+      if (fsData.settings) {
+        const s = fsData.settings;
+        const isLegacyDisabledBanner =
+          s.announcementText?.includes('Checkout paused') ||
+          s.announcementText?.includes('Sales Paused') ||
+          s.announcementText?.includes('Launch Coming Soon') ||
+          s.announcementText?.includes('Payment collection disabled');
+        const cleanAnnouncement = isLegacyDisabledBanner
+          ? DEFAULT_SETTINGS.announcementText
+          : s.announcementText;
+        const cleanAnnouncementHi =
+          isLegacyDisabledBanner ||
+          s.announcementTextHi?.includes('चेकआउट बंद') ||
+          s.announcementTextHi?.includes('भुगतान बंद')
+            ? DEFAULT_SETTINGS.announcementTextHi
+            : s.announcementTextHi;
+        setSettings((prev) => ({
+          ...prev,
+          ...s,
+          safetyComplianceApproved: isLegacyDisabledBanner ? true : s.safetyComplianceApproved,
+          announcementText: cleanAnnouncement || prev.announcementText,
+          announcementTextHi: cleanAnnouncementHi || prev.announcementTextHi,
+        }));
+      }
+      if (fsData.reviews.length > 0) {
+        setReviews((prev) => {
+          const seen = new Set(prev.map((r) => r.id));
+          const merged = [...prev];
+          for (const rev of fsData.reviews) {
+            if (!seen.has(rev.id)) merged.push(rev);
+          }
+          return merged;
+        });
       }
     } catch {
-      // Public fallback already loaded via /api/storefront
+      // Public fallback already loaded via /api/storefront or defaults
     }
   }, []);
 

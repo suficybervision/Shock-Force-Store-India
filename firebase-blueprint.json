@@ -273,7 +273,7 @@
         },
         "paymentProofPath": {
           "type": "string",
-          "maxLength": 300
+          "maxLength": 350000
         },
         "paymentProofName": {
           "type": "string",
@@ -482,6 +482,121 @@
         }
       },
       "required": ["id", "name", "phone", "consent", "createdAt"]
+    },
+    "OrderTracking": {
+      "title": "OrderTracking",
+      "description": "Strictly non-PII public order tracking projection linked 1:1 to an Order",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 48,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "AWAITING_PAYMENT",
+            "PENDING_VERIFICATION",
+            "APPROVED",
+            "REJECTED",
+            "SHIPPED",
+            "DELIVERED"
+          ]
+        },
+        "paymentVerified": {
+          "type": "boolean"
+        },
+        "paymentStatus": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "orderStatus": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "shippingStatus": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "courierName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "trackingId": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "rejectionReason": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "productTitle": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "subtotalInr": {
+          "type": "number"
+        },
+        "deliveryChargeInr": {
+          "type": "number"
+        },
+        "totalInr": {
+          "type": "number"
+        }
+      },
+      "required": [
+        "orderId",
+        "createdAt",
+        "updatedAt",
+        "status",
+        "paymentVerified",
+        "paymentStatus",
+        "orderStatus",
+        "shippingStatus",
+        "courierName",
+        "trackingId",
+        "rejectionReason",
+        "productTitle",
+        "quantity",
+        "subtotalInr",
+        "deliveryChargeInr",
+        "totalInr"
+      ]
+    },
+    "OrderCounter": {
+      "title": "OrderCounter",
+      "description": "Monotonic daily sequence counter for generating unique non-reused Order IDs",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 32,
+          "pattern": "^orders_[0-9]{8}$"
+        },
+        "seq": {
+          "type": "number"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "seq", "updatedAt"]
     }
   },
   "firestore": {
@@ -496,6 +611,14 @@
     "/orders/{orderId}": {
       "schema": { "$ref": "#/entities/Order" },
       "description": "Customer orders containing shipping PII and manual payment verification status"
+    },
+    "/orderTracking/{orderId}": {
+      "schema": { "$ref": "#/entities/OrderTracking" },
+      "description": "Non-PII public order tracking status keyed by unique Order ID"
+    },
+    "/counters/{counterId}": {
+      "schema": { "$ref": "#/entities/OrderCounter" },
+      "description": "Monotonic daily order code counters"
     },
     "/adminUsers/{adminUid}": {
       "schema": { "$ref": "#/entities/AdminUser" },

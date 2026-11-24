@@ -11,7 +11,7 @@ import {
   VALIDATION_PATTERNS,
 } from '../types/store';
 import { TRANSLATIONS } from '../i18n/translations';
-import { auth } from '../lib/firebase';
+import { createOrderHybrid } from '../lib/orderService';
 
 interface CheckoutViewProps {
   product: ProductData;
@@ -101,10 +101,8 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
     setErrorMsg('');
 
     try {
-      const response = await fetch('/api/orders', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
+      const result = await createOrderHybrid(
+        {
           customerName: customerName.trim(),
           phone: phone.trim(),
           state: state.trim(),
@@ -114,25 +112,18 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
           landmark: landmark.trim(),
           quantity: safeQty,
           idempotencyKey,
-          customerUid: auth.currentUser?.uid || 'guest',
-        }),
-      });
+        },
+        product,
+        settings
+      );
 
-      const data = (await response.json()) as {
-        order?: OrderRecord;
-        lookupToken?: string;
-        error?: string;
-      };
-
-      if (!response.ok || !data.order || !data.lookupToken) {
-        setErrorMsg(data.error || 'Could not place order. Please review your details.');
-        setSubmitting(false);
-        return;
-      }
-
-      onOrderCreated(data.order, data.lookupToken);
-    } catch {
-      setErrorMsg('Network error while submitting order. Please try again.');
+      onOrderCreated(result.order, result.lookupToken);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : 'Could not place order. Please review your details and try again.'
+      );
       setSubmitting(false);
     }
   };

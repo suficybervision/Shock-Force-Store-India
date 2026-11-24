@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
@@ -15,9 +16,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const ROOT_DIR = __dirname;
-const DATA_DIR = path.resolve(ROOT_DIR, 'data');
-const PRIVATE_PROOF_DIR = path.resolve(ROOT_DIR, 'private_uploads', 'payment_proofs');
-const PUBLIC_ASSET_DIR = path.resolve(ROOT_DIR, 'public_assets');
+let STORAGE_BASE = ROOT_DIR;
+try {
+  fs.mkdirSync(path.resolve(ROOT_DIR, 'data'), { recursive: true });
+  fs.accessSync(path.resolve(ROOT_DIR, 'data'), fs.constants.W_OK);
+} catch {
+  STORAGE_BASE = path.resolve(os.tmpdir(), 'shock_shoe_india');
+}
+
+const DATA_DIR = path.resolve(STORAGE_BASE, 'data');
+const PRIVATE_PROOF_DIR = path.resolve(STORAGE_BASE, 'private_uploads', 'payment_proofs');
+const PUBLIC_ASSET_DIR = path.resolve(STORAGE_BASE, 'public_assets');
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 fs.mkdirSync(PRIVATE_PROOF_DIR, { recursive: true });
@@ -432,6 +441,9 @@ function sanitizeSafeUrl(url: string): string {
   const trimmed = (url || '').trim();
   if (!trimmed) return '';
   if (trimmed.startsWith('/assets/aistudio/') || trimmed.startsWith('/api/assets/')) {
+    return trimmed;
+  }
+  if (/^data:image\/(jpeg|png|webp);base64,[a-zA-Z0-9+/=]+$/.test(trimmed) && trimmed.length <= 150000) {
     return trimmed;
   }
   try {

@@ -10,6 +10,7 @@ import {
 } from '../types/store';
 import { TRANSLATIONS } from '../i18n/translations';
 import { UpiQrCode } from './UpiQrCode';
+import { submitPaymentProofHybrid } from '../lib/orderService';
 
 interface PaymentViewProps {
   order: OrderRecord;
@@ -117,26 +118,14 @@ export const PaymentView: React.FC<PaymentViewProps> = ({
     setErrorMsg('');
 
     try {
-      const formData = new FormData();
-      formData.append('utrNumber', cleanUtr);
-      formData.append('lookupToken', lookupToken);
-      formData.append('phone', order.phone);
-      formData.append('screenshot', file);
-
-      const res = await fetch(`/api/orders/${encodeURIComponent(order.orderId)}/payment-proof`, {
-        method: 'POST',
-        body: formData,
-      });
-      const data = (await res.json()) as { order?: OrderRecord; error?: string };
-      if (!res.ok || !data.order) {
-        setErrorMsg(data.error || 'Could not upload payment proof. Please check your file and UTR.');
-        setSubmitting(false);
-        return;
-      }
-
-      onProofSubmitted(data.order);
-    } catch {
-      setErrorMsg('Network error while uploading screenshot. Please try again.');
+      const updatedOrder = await submitPaymentProofHybrid(order, cleanUtr, file, lookupToken);
+      onProofSubmitted(updatedOrder);
+    } catch (err) {
+      setErrorMsg(
+        err instanceof Error && err.message
+          ? err.message
+          : 'Could not upload payment proof. Please check your file and UTR.'
+      );
       setSubmitting(false);
     }
   };

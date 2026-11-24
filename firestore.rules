@@ -66,7 +66,7 @@ service cloud.firestore {
         && data.stock is number && data.stock >= 0 && data.stock <= 100000
         && data.active is bool
         && data.images is list && data.images.size() >= 1 && data.images.size() <= 10
-        && data.images[0] is string && data.images[0].size() >= 1 && data.images[0].size() <= 500
+        && data.images[0] is string && data.images[0].size() >= 1 && data.images[0].size() <= 150000
         && data.videos is list && data.videos.size() <= 4
         && (data.videos.size() == 0 || (data.videos[0] is string && data.videos[0].size() <= 500))
         && data.specs is list && data.specs.size() <= 20
@@ -140,18 +140,55 @@ service cloud.firestore {
         && data.productTitle is string && data.productTitle.size() >= 2 && data.productTitle.size() <= 120
         && data.unitPriceInr is number && data.unitPriceInr > 0 && data.unitPriceInr <= 1000000
         && data.quantity is number && data.quantity >= 1 && data.quantity <= 20
-        && data.subtotalInr is number && data.subtotalInr > 0 && data.subtotalInr <= 20000000
+        && data.subtotalInr is number && data.subtotalInr == data.unitPriceInr * data.quantity && data.subtotalInr <= 20000000
         && data.deliveryChargeInr is number && data.deliveryChargeInr >= 0 && data.deliveryChargeInr <= 50000
-        && data.totalInr is number && data.totalInr > 0 && data.totalInr <= 20050000
+        && data.totalInr is number && data.totalInr == data.subtotalInr + data.deliveryChargeInr && data.totalInr <= 20050000
         && data.status in ['AWAITING_PAYMENT', 'PENDING_VERIFICATION', 'APPROVED', 'REJECTED', 'SHIPPED', 'DELIVERED']
         && data.paymentVerified is bool
         && data.utrNumber is string && data.utrNumber.size() <= 40
-        && data.paymentProofPath is string && data.paymentProofPath.size() <= 300
+        && data.paymentProofPath is string && data.paymentProofPath.size() <= 350000
         && data.paymentProofName is string && data.paymentProofName.size() <= 120
         && data.rejectionReason is string && data.rejectionReason.size() <= 300
         && data.courierName is string && data.courierName.size() <= 80
         && data.trackingId is string && data.trackingId.size() <= 80
         && data.createdAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidOrderTracking(data) {
+      return data.keys().hasAll([
+          'orderId', 'createdAt', 'updatedAt', 'status', 'paymentVerified',
+          'paymentStatus', 'orderStatus', 'shippingStatus', 'courierName', 'trackingId',
+          'rejectionReason', 'productTitle', 'quantity', 'subtotalInr', 'deliveryChargeInr', 'totalInr'
+        ])
+        && data.keys().hasOnly([
+          'orderId', 'createdAt', 'updatedAt', 'status', 'paymentVerified',
+          'paymentStatus', 'orderStatus', 'shippingStatus', 'courierName', 'trackingId',
+          'rejectionReason', 'productTitle', 'quantity', 'subtotalInr', 'deliveryChargeInr', 'totalInr'
+        ])
+        && isValidId(data.orderId) && data.orderId.size() >= 6 && data.orderId.size() <= 48
+        && data.createdAt is timestamp
+        && data.updatedAt is timestamp
+        && data.status in ['AWAITING_PAYMENT', 'PENDING_VERIFICATION', 'APPROVED', 'REJECTED', 'SHIPPED', 'DELIVERED']
+        && data.paymentVerified is bool
+        && data.paymentStatus is string && data.paymentStatus.size() >= 2 && data.paymentStatus.size() <= 60
+        && data.orderStatus is string && data.orderStatus.size() >= 2 && data.orderStatus.size() <= 40
+        && data.shippingStatus is string && data.shippingStatus.size() >= 2 && data.shippingStatus.size() <= 60
+        && data.courierName is string && data.courierName.size() <= 80
+        && data.trackingId is string && data.trackingId.size() <= 80
+        && data.rejectionReason is string && data.rejectionReason.size() <= 300
+        && data.productTitle is string && data.productTitle.size() >= 2 && data.productTitle.size() <= 120
+        && data.quantity is number && data.quantity >= 1 && data.quantity <= 20
+        && data.subtotalInr is number && data.subtotalInr > 0 && data.subtotalInr <= 20000000
+        && data.deliveryChargeInr is number && data.deliveryChargeInr >= 0 && data.deliveryChargeInr <= 50000
+        && data.totalInr is number && data.totalInr == data.subtotalInr + data.deliveryChargeInr;
+    }
+
+    function isValidCounter(data) {
+      return data.keys().hasAll(['id', 'seq', 'updatedAt'])
+        && data.keys().hasOnly(['id', 'seq', 'updatedAt'])
+        && isValidId(data.id) && data.id.matches('^orders_[0-9]{8}$')
+        && data.seq is number && data.seq >= 1 && data.seq <= 1000000
         && data.updatedAt is timestamp;
     }
 
@@ -245,7 +282,7 @@ service cloud.firestore {
         && adminUid != request.auth.uid;
     }
 
-    // Customer orders (PII protected; strictly owner or admin)
+    // Customer orders (PII strictly restricted to owner/admin on reads; hardened storefront checkout writes)
     match /orders/{orderId} {
       allow get: if isValidId(orderId) && (
         isAdmin() ||
@@ -255,38 +292,114 @@ service cloud.firestore {
         isSignedIn() && resource.data.customerUid == request.auth.uid
       );
       allow create: if isValidId(orderId)
-        && isSignedIn()
         && isValidOrder(incoming())
         && incoming().orderId == orderId
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/orderTracking/$(orderId))
         && (
           isAdmin() ||
           (
-            incoming().customerUid == request.auth.uid &&
-            incoming().status == 'AWAITING_PAYMENT' &&
-            incoming().paymentVerified == false
+            (incoming().customerUid == 'guest' || (isSignedIn() && incoming().customerUid == request.auth.uid))
+            && incoming().status == 'AWAITING_PAYMENT'
+            && incoming().paymentVerified == false
+            && incoming().utrNumber == ''
+            && incoming().paymentProofPath == ''
+            && incoming().paymentProofName == ''
+            && incoming().rejectionReason == ''
+            && incoming().courierName == ''
+            && incoming().trackingId == ''
+            && (!exists(/databases/$(database)/documents/products/$(incoming().productId))
+              || incoming().unitPriceInr == get(/databases/$(database)/documents/products/$(incoming().productId)).data.priceInr)
+            && (!exists(/databases/$(database)/documents/settings/storefront)
+              || get(/databases/$(database)/documents/settings/storefront).data.deliveryMode != 'flat'
+              || incoming().deliveryChargeInr == get(/databases/$(database)/documents/settings/storefront).data.flatDeliveryChargeInr)
           )
         );
       allow update: if isValidId(orderId)
-        && isSignedIn()
         && isValidOrder(incoming())
         && incoming().orderId == existing().orderId
         && incoming().customerUid == existing().customerUid
         && incoming().createdAt == existing().createdAt
         && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/orderTracking/$(orderId))
         && (
           isAdmin() ||
           (
-            existing().customerUid == request.auth.uid &&
-            existing().status == 'AWAITING_PAYMENT' &&
-            incoming().status == 'PENDING_VERIFICATION' &&
-            incoming().paymentVerified == false &&
-            incoming().diff(existing()).affectedKeys().hasOnly([
-              'utrNumber', 'paymentProofPath', 'paymentProofName', 'status', 'updatedAt'
+            (existing().status == 'AWAITING_PAYMENT' || existing().status == 'REJECTED')
+            && incoming().status == 'PENDING_VERIFICATION'
+            && incoming().paymentVerified == false
+            && incoming().utrNumber.size() >= 8
+            && incoming().paymentProofPath.size() >= 5
+            && incoming().rejectionReason == ''
+            && getAfter(/databases/$(database)/documents/orderTracking/$(orderId)).data.status == 'PENDING_VERIFICATION'
+            && getAfter(/databases/$(database)/documents/orderTracking/$(orderId)).data.paymentVerified == false
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'utrNumber', 'paymentProofPath', 'paymentProofName', 'status', 'rejectionReason', 'updatedAt'
             ])
           )
         );
+      allow delete: if false;
+    }
+
+    // Non-PII public order tracking projection (single-doc lookup by exact Order ID only; no list enumeration)
+    match /orderTracking/{orderId} {
+      allow get: if isValidId(orderId);
+      allow list: if false;
+      allow create: if isValidId(orderId)
+        && isValidOrderTracking(incoming())
+        && incoming().orderId == orderId
+        && incoming().createdAt == request.time
+        && incoming().updatedAt == request.time
+        && existsAfter(/databases/$(database)/documents/orders/$(orderId))
+        && (
+          isAdmin() ||
+          (
+            incoming().status == 'AWAITING_PAYMENT'
+            && incoming().paymentVerified == false
+            && incoming().courierName == ''
+            && incoming().trackingId == ''
+            && incoming().rejectionReason == ''
+          )
+        );
+      allow update: if isValidId(orderId)
+        && isValidOrderTracking(incoming())
+        && incoming().orderId == existing().orderId
+        && incoming().createdAt == existing().createdAt
+        && incoming().updatedAt == request.time
+        && (
+          isAdmin() ||
+          (
+            (existing().status == 'AWAITING_PAYMENT' || existing().status == 'REJECTED')
+            && incoming().status == 'PENDING_VERIFICATION'
+            && incoming().paymentVerified == false
+            && incoming().rejectionReason == ''
+            && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.status == 'PENDING_VERIFICATION'
+            && incoming().diff(existing()).affectedKeys().hasOnly([
+              'status', 'paymentStatus', 'orderStatus', 'shippingStatus', 'rejectionReason', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if false;
+    }
+
+    // Monotonic daily order code counter
+    match /counters/{counterId} {
+      allow get: if isValidId(counterId) && counterId.matches('^orders_[0-9]{8}$');
+      allow list: if false;
+      allow create: if isValidId(counterId)
+        && counterId.matches('^orders_[0-9]{8}$')
+        && isValidCounter(incoming())
+        && incoming().id == counterId
+        && incoming().seq == 1
+        && incoming().updatedAt == request.time;
+      allow update: if isValidId(counterId)
+        && counterId.matches('^orders_[0-9]{8}$')
+        && isValidCounter(incoming())
+        && incoming().id == existing().id
+        && incoming().updatedAt == request.time
+        && (isAdmin() || incoming().seq == existing().seq + 1)
+        && incoming().diff(existing()).affectedKeys().hasOnly(['seq', 'updatedAt']);
       allow delete: if false;
     }
 
@@ -309,10 +422,18 @@ service cloud.firestore {
       allow get: if isValidId(reviewId) && (resource.data.approved == true || isAdmin());
       allow list: if resource.data.approved == true || isBootstrappedAdmin();
       allow create: if isValidId(reviewId)
-        && isAdmin()
         && isValidReview(incoming())
         && incoming().id == reviewId
-        && incoming().createdAt == request.time;
+        && incoming().createdAt == request.time
+        && (
+          isAdmin() ||
+          (
+            incoming().approved == false
+            && incoming().verifiedPurchase == true
+            && exists(/databases/$(database)/documents/orderTracking/$(incoming().orderId))
+            && get(/databases/$(database)/documents/orderTracking/$(incoming().orderId)).data.status == 'DELIVERED'
+          )
+        );
       allow update: if isValidId(reviewId)
         && isAdmin()
         && isValidReview(incoming())
