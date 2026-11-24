@@ -1,0 +1,8 @@
+{
+  "name": "Shock Shoe India",
+  "description": "Official storefront for Shock Shoe India — prototype electrostatic footwear showcase with compliance gating, Indian checkout, manual UPI verification, and admin operations.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

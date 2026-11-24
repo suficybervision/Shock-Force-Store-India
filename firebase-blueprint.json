@@ -1,0 +1,517 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Shock Shoe India product catalog entry",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "title": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "titleHi": {
+          "type": "string",
+          "maxLength": 160
+        },
+        "description": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 3000
+        },
+        "descriptionHi": {
+          "type": "string",
+          "maxLength": 3500
+        },
+        "priceInr": {
+          "type": "number"
+        },
+        "stock": {
+          "type": "number"
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "images": {
+          "type": "array"
+        },
+        "videos": {
+          "type": "array"
+        },
+        "specs": {
+          "type": "array"
+        },
+        "safetyWarnings": {
+          "type": "array"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "titleHi",
+        "description",
+        "descriptionHi",
+        "priceInr",
+        "stock",
+        "active",
+        "images",
+        "videos",
+        "specs",
+        "safetyWarnings",
+        "updatedAt"
+      ]
+    },
+    "StorefrontSettings": {
+      "title": "StorefrontSettings",
+      "description": "Admin-controlled storefront, safety gate, UPI QR, delivery, and policy settings (zero PII)",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "brandName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "announcementText": {
+          "type": "string",
+          "maxLength": 200
+        },
+        "announcementTextHi": {
+          "type": "string",
+          "maxLength": 240
+        },
+        "safetyComplianceApproved": {
+          "type": "boolean"
+        },
+        "complianceOwnerName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "complianceConfirmedAt": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "merchantUpiId": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "merchantDisplayName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "upiQrImageUrl": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "deliveryMode": {
+          "type": "string",
+          "enum": ["flat", "pincode"]
+        },
+        "flatDeliveryChargeInr": {
+          "type": "number"
+        },
+        "pinDeliveryRulesText": {
+          "type": "string",
+          "maxLength": 2000
+        },
+        "shippingPolicy": {
+          "type": "string",
+          "maxLength": 3000
+        },
+        "returnPolicy": {
+          "type": "string",
+          "maxLength": 3000
+        },
+        "contactEmail": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "contactPhone": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "contactAddress": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "brandName",
+        "announcementText",
+        "announcementTextHi",
+        "safetyComplianceApproved",
+        "complianceOwnerName",
+        "complianceConfirmedAt",
+        "merchantUpiId",
+        "merchantDisplayName",
+        "upiQrImageUrl",
+        "deliveryMode",
+        "flatDeliveryChargeInr",
+        "pinDeliveryRulesText",
+        "shippingPolicy",
+        "returnPolicy",
+        "contactEmail",
+        "contactPhone",
+        "contactAddress",
+        "updatedAt"
+      ]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer order with Indian shipping address and manual UPI verification status",
+      "type": "object",
+      "properties": {
+        "orderId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 48,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "customerUid": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[6-9][0-9]{9}$"
+        },
+        "state": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "city": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 60
+        },
+        "pinCode": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 6,
+          "pattern": "^[1-9][0-9]{5}$"
+        },
+        "address": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 300
+        },
+        "landmark": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "productId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "productTitle": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 120
+        },
+        "unitPriceInr": {
+          "type": "number"
+        },
+        "quantity": {
+          "type": "number"
+        },
+        "subtotalInr": {
+          "type": "number"
+        },
+        "deliveryChargeInr": {
+          "type": "number"
+        },
+        "totalInr": {
+          "type": "number"
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "AWAITING_PAYMENT",
+            "PENDING_VERIFICATION",
+            "APPROVED",
+            "REJECTED",
+            "SHIPPED",
+            "DELIVERED"
+          ]
+        },
+        "paymentVerified": {
+          "type": "boolean"
+        },
+        "utrNumber": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "paymentProofPath": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "paymentProofName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "rejectionReason": {
+          "type": "string",
+          "maxLength": 300
+        },
+        "courierName": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "trackingId": {
+          "type": "string",
+          "maxLength": 80
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "orderId",
+        "customerUid",
+        "customerName",
+        "phone",
+        "state",
+        "city",
+        "pinCode",
+        "address",
+        "landmark",
+        "productId",
+        "productTitle",
+        "unitPriceInr",
+        "quantity",
+        "subtotalInr",
+        "deliveryChargeInr",
+        "totalInr",
+        "status",
+        "paymentVerified",
+        "utrNumber",
+        "paymentProofPath",
+        "paymentProofName",
+        "rejectionReason",
+        "courierName",
+        "trackingId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "AdminUser": {
+      "title": "AdminUser",
+      "description": "Explicitly authorized admin user record",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "displayName": {
+          "type": "string",
+          "maxLength": 100
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin"]
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "displayName", "role", "active", "createdAt", "updatedAt"]
+    },
+    "AuditLog": {
+      "title": "AuditLog",
+      "description": "Immutable admin audit log entry",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "action": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "targetOrderId": {
+          "type": "string",
+          "maxLength": 64
+        },
+        "actorUid": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 128
+        },
+        "actorEmail": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 120
+        },
+        "details": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 500
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "action", "targetOrderId", "actorUid", "actorEmail", "details", "createdAt"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Genuine verified customer review linked to a delivered order",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "orderId": {
+          "type": "string",
+          "minLength": 6,
+          "maxLength": 48
+        },
+        "customerName": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 80
+        },
+        "rating": {
+          "type": "number"
+        },
+        "comment": {
+          "type": "string",
+          "minLength": 5,
+          "maxLength": 1000
+        },
+        "verifiedPurchase": {
+          "type": "boolean"
+        },
+        "approved": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "orderId", "customerName", "rating", "comment", "verifiedPurchase", "approved", "createdAt"]
+    },
+    "LaunchLead": {
+      "title": "LaunchLead",
+      "description": "Customer launch notification interest registration",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 2,
+          "maxLength": 100
+        },
+        "phone": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "pattern": "^[6-9][0-9]{9}$"
+        },
+        "consent": {
+          "type": "boolean"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "name", "phone", "consent", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Public product catalog managed by admin"
+    },
+    "/settings/{settingId}": {
+      "schema": { "$ref": "#/entities/StorefrontSettings" },
+      "description": "Storefront configuration, safety gate, UPI QR, delivery charges, and policies"
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Customer orders containing shipping PII and manual payment verification status"
+    },
+    "/adminUsers/{adminUid}": {
+      "schema": { "$ref": "#/entities/AdminUser" },
+      "description": "Explicitly authorized admin accounts"
+    },
+    "/auditLogs/{logId}": {
+      "schema": { "$ref": "#/entities/AuditLog" },
+      "description": "Immutable admin action audit trail"
+    },
+    "/reviews/{reviewId}": {
+      "schema": { "$ref": "#/entities/Review" },
+      "description": "Genuine verified customer reviews approved by admin"
+    },
+    "/launchLeads/{leadId}": {
+      "schema": { "$ref": "#/entities/LaunchLead" },
+      "description": "Launch interest registrations synced by admin"
+    }
+  }
+}

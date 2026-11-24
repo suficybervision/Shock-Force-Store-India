@@ -1,0 +1,41 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules for Shock Shoe India
+// Deploy via Firebase CLI: firebase deploy --only storage
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null && request.auth.token.email_verified == true;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && (
+        request.auth.token.email == 'hajshdbdb262837@gmail.com' ||
+        firestore.exists(/databases/(default)/documents/adminUsers/$(request.auth.uid))
+      );
+    }
+
+    // Default deny
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Private payment screenshots: customers cannot list/read others' proofs; only admins can read
+    match /payment_proofs/{orderId}/{fileName} {
+      allow read: if isAdmin();
+      allow write: if request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)')
+        && fileName.matches('^[a-zA-Z0-9_\\-]+\\.(jpg|jpeg|png|webp)$');
+    }
+
+    // Public catalog assets uploaded by admin (product images, static UPI QR)
+    match /storefront_assets/{fileName} {
+      allow read: if true;
+      allow write: if isAdmin()
+        && request.resource != null
+        && request.resource.size <= 5 * 1024 * 1024
+        && request.resource.contentType.matches('image/(jpeg|png|webp)');
+    }
+  }
+}
