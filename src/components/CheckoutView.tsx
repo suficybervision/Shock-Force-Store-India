@@ -11,7 +11,7 @@ import {
   VALIDATION_PATTERNS,
 } from '../types/store';
 import { TRANSLATIONS } from '../i18n/translations';
-import { createOrderHybrid } from '../lib/orderService';
+import { createOrderHybrid, formatUserFriendlyError } from '../lib/orderService';
 
 interface CheckoutViewProps {
   product: ProductData;
@@ -120,9 +120,10 @@ export const CheckoutView: React.FC<CheckoutViewProps> = ({
       onOrderCreated(result.order, result.lookupToken);
     } catch (err) {
       setErrorMsg(
-        err instanceof Error && err.message
-          ? err.message
-          : 'Could not place order. Please review your details and try again.'
+        formatUserFriendlyError(
+          err,
+          'Could not place order. Please review your details and try again.'
+        )
       );
       setSubmitting(false);
     }

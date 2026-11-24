@@ -8,7 +8,12 @@ import {
   VALIDATION_PATTERNS,
 } from '../types/store';
 import { TRANSLATIONS } from '../i18n/translations';
-import { submitReviewHybrid, toTrackingInfo, trackOrderHybrid } from '../lib/orderService';
+import {
+  formatUserFriendlyError,
+  submitReviewHybrid,
+  toTrackingInfo,
+  trackOrderHybrid,
+} from '../lib/orderService';
 
 interface OrderLookupViewProps {
   initialOrder?: OrderRecord | null;
@@ -93,9 +98,7 @@ export const OrderLookupView: React.FC<OrderLookupViewProps> = ({
       setReviewMsg(message);
       setReviewComment('');
     } catch (err) {
-      setReviewMsg(
-        err instanceof Error && err.message ? err.message : 'Could not submit review.'
-      );
+      setReviewMsg(formatUserFriendlyError(err, 'Could not submit review.'));
     } finally {
       setSubmittingReview(false);
     }

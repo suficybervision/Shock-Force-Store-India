@@ -13,7 +13,7 @@ import {
   where,
   writeBatch,
 } from 'firebase/firestore';
-import { auth, db } from './firebase';
+import { auth, db, handleFirestoreError, OperationType } from './firebase';
 import {
   AuditLogEntry,
   calculateDeliveryCharge,
@@ -32,6 +32,55 @@ export const BOOTSTRAPPED_ADMIN_EMAIL = 'hajshdbdb262837@gmail.com';
 export function isJsonResponse(res: Response): boolean {
   const ct = res.headers.get('content-type') || '';
   return ct.toLowerCase().includes('application/json');
+}
+
+export function isPermissionDeniedError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = 'code' in err ? String((err as { code?: unknown }).code || '') : '';
+  const msg = err instanceof Error ? err.message : String(err);
+  return (
+    code === 'permission-denied' ||
+    msg.includes('Missing or insufficient permissions') ||
+    msg.includes('PERMISSION_DENIED')
+  );
+}
+
+export function isAlreadyExistsError(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false;
+  const code = 'code' in err ? String((err as { code?: unknown }).code || '') : '';
+  const msg = err instanceof Error ? err.message : String(err);
+  return code === 'already-exists' || msg.includes('ALREADY_EXISTS');
+}
+
+export function formatUserFriendlyError(err: unknown, fallback: string): string {
+  if (!(err instanceof Error) || !err.message) return fallback;
+  const raw = err.message.trim();
+  if (raw.startsWith('{')) {
+    try {
+      const parsed = JSON.parse(raw) as { error?: string };
+      if (parsed.error) {
+        if (
+          parsed.error.includes('Missing or insufficient permissions') ||
+          parsed.error.includes('PERMISSION_DENIED')
+        ) {
+          return fallback;
+        }
+        return parsed.error;
+      }
+    } catch {
+      // Fall through to raw message
+    }
+  }
+  return raw;
+}
+
+function generateOrderSuffix(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let out = '';
+  for (let i = 0; i < 4; i++) {
+    out += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return out;
 }
 
 export function timestampToIso(value: unknown): string {
@@ -330,112 +379,140 @@ export async function createOrderHybrid(
   const totalInr = subtotalInr + deliveryChargeInr;
   const nowIso = new Date().toISOString();
 
-  const createdOrder = await runTransaction(db, async (tx) => {
-    const counterSnap = await tx.get(counterRef);
-    const currentSeq = counterSnap.exists() ? Number(counterSnap.data().seq || 0) : 0;
-    const nextSeq = currentSeq + 1;
+  let createdOrder: OrderRecord | null = null;
+  let lastAttemptPath = 'orders';
 
-    let candidateId = `${prefix}${String(nextSeq).padStart(3, '0')}`;
-    const existingTrackingSnap = await tx.get(doc(db, 'orderTracking', candidateId));
-    if (existingTrackingSnap.exists()) {
-      const randSuffix = Math.random().toString(36).slice(2, 6).toUpperCase();
-      candidateId = `${prefix}${String(nextSeq).padStart(3, '0')}-${randSuffix}`;
-    }
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const forceUniqueSuffix = attempt > 0;
+    try {
+      createdOrder = await runTransaction(db, async (tx) => {
+        const counterSnap = await tx.get(counterRef);
+        const currentSeq = counterSnap.exists() ? Number(counterSnap.data().seq || 0) : 0;
+        const nextSeq = currentSeq + 1;
+        const baseCode = `${prefix}${String(nextSeq).padStart(3, '0')}`;
 
-    const orderDoc: Record<string, unknown> = {
-      orderId: candidateId,
-      customerUid,
-      customerName: payload.customerName.trim().slice(0, 100),
-      phone: payload.phone.trim(),
-      state: payload.state.trim().slice(0, 60),
-      city: payload.city.trim().slice(0, 60),
-      pinCode: payload.pinCode.trim(),
-      address: payload.address.trim().slice(0, 300),
-      landmark: payload.landmark.trim().slice(0, 120),
-      productId: (authoritativeProduct.id || 'shock-shoe').slice(0, 64),
-      productTitle: (authoritativeProduct.title || DEFAULT_PRODUCT.title).slice(0, 120),
-      unitPriceInr,
-      quantity: safeQty,
-      subtotalInr,
-      deliveryChargeInr,
-      totalInr,
-      status: 'AWAITING_PAYMENT',
-      paymentVerified: false,
-      utrNumber: '',
-      paymentProofPath: '',
-      paymentProofName: '',
-      rejectionReason: '',
-      courierName: '',
-      trackingId: '',
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    };
+        let candidateId = forceUniqueSuffix
+          ? `${baseCode}-${generateOrderSuffix()}`
+          : baseCode;
 
-    const trackingInfo = toTrackingInfo({
-      orderId: candidateId,
-      createdAt: nowIso,
-      updatedAt: nowIso,
-      status: 'AWAITING_PAYMENT',
-      paymentVerified: false,
-      courierName: '',
-      trackingId: '',
-      rejectionReason: '',
-      productTitle: orderDoc.productTitle as string,
-      quantity: safeQty,
-      subtotalInr,
-      deliveryChargeInr,
-      totalInr,
-    });
+        const existingTrackingSnap = await tx.get(doc(db, 'orderTracking', candidateId));
+        if (existingTrackingSnap.exists()) {
+          candidateId = `${baseCode}-${generateOrderSuffix()}`;
+        }
 
-    if (counterSnap.exists()) {
-      tx.update(counterRef, {
-        seq: nextSeq,
-        updatedAt: serverTimestamp(),
+        lastAttemptPath = `orders/${candidateId}`;
+
+        const orderDoc: Record<string, unknown> = {
+          orderId: candidateId,
+          customerUid,
+          customerName: payload.customerName.trim().slice(0, 100),
+          phone: payload.phone.trim(),
+          state: payload.state.trim().slice(0, 60),
+          city: payload.city.trim().slice(0, 60),
+          pinCode: payload.pinCode.trim(),
+          address: payload.address.trim().slice(0, 300),
+          landmark: payload.landmark.trim().slice(0, 120),
+          productId: (authoritativeProduct.id || 'shock-shoe').slice(0, 64),
+          productTitle: (authoritativeProduct.title || DEFAULT_PRODUCT.title).slice(0, 120),
+          unitPriceInr,
+          quantity: safeQty,
+          subtotalInr,
+          deliveryChargeInr,
+          totalInr,
+          status: 'AWAITING_PAYMENT',
+          paymentVerified: false,
+          utrNumber: '',
+          paymentProofPath: '',
+          paymentProofName: '',
+          rejectionReason: '',
+          courierName: '',
+          trackingId: '',
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        };
+
+        const trackingInfo = toTrackingInfo({
+          orderId: candidateId,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          status: 'AWAITING_PAYMENT',
+          paymentVerified: false,
+          courierName: '',
+          trackingId: '',
+          rejectionReason: '',
+          productTitle: orderDoc.productTitle as string,
+          quantity: safeQty,
+          subtotalInr,
+          deliveryChargeInr,
+          totalInr,
+        });
+
+        if (counterSnap.exists()) {
+          tx.update(counterRef, {
+            seq: nextSeq,
+            updatedAt: serverTimestamp(),
+          });
+        } else {
+          tx.set(counterRef, {
+            id: counterId,
+            seq: 1,
+            updatedAt: serverTimestamp(),
+          });
+        }
+
+        tx.set(doc(db, 'orders', candidateId), orderDoc);
+        tx.set(doc(db, 'orderTracking', candidateId), {
+          ...trackingInfo,
+          createdAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+
+        return {
+          orderId: candidateId,
+          customerUid,
+          customerName: orderDoc.customerName as string,
+          phone: orderDoc.phone as string,
+          state: orderDoc.state as string,
+          city: orderDoc.city as string,
+          pinCode: orderDoc.pinCode as string,
+          address: orderDoc.address as string,
+          landmark: orderDoc.landmark as string,
+          productId: orderDoc.productId as string,
+          productTitle: orderDoc.productTitle as string,
+          unitPriceInr,
+          quantity: safeQty,
+          subtotalInr,
+          deliveryChargeInr,
+          totalInr,
+          status: 'AWAITING_PAYMENT',
+          paymentVerified: false,
+          utrNumber: '',
+          paymentProofPath: '',
+          paymentProofName: '',
+          rejectionReason: '',
+          courierName: '',
+          trackingId: '',
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        } satisfies OrderRecord;
       });
-    } else {
-      tx.set(counterRef, {
-        id: counterId,
-        seq: 1,
-        updatedAt: serverTimestamp(),
-      });
+      break;
+    } catch (err) {
+      const retryableCollision = isPermissionDeniedError(err) || isAlreadyExistsError(err);
+      if (retryableCollision && attempt < 4) {
+        // Legacy /orders/{baseCode} doc without /orderTracking/{baseCode} triggers allow-update -> retry with unique suffix
+        continue;
+      }
+      if (isPermissionDeniedError(err)) {
+        handleFirestoreError(err, OperationType.CREATE, lastAttemptPath);
+      }
+      throw err;
     }
+  }
 
-    tx.set(doc(db, 'orders', candidateId), orderDoc);
-    tx.set(doc(db, 'orderTracking', candidateId), {
-      ...trackingInfo,
-      createdAt: serverTimestamp(),
-      updatedAt: serverTimestamp(),
-    });
-
-    return {
-      orderId: candidateId,
-      customerUid,
-      customerName: orderDoc.customerName as string,
-      phone: orderDoc.phone as string,
-      state: orderDoc.state as string,
-      city: orderDoc.city as string,
-      pinCode: orderDoc.pinCode as string,
-      address: orderDoc.address as string,
-      landmark: orderDoc.landmark as string,
-      productId: orderDoc.productId as string,
-      productTitle: orderDoc.productTitle as string,
-      unitPriceInr,
-      quantity: safeQty,
-      subtotalInr,
-      deliveryChargeInr,
-      totalInr,
-      status: 'AWAITING_PAYMENT',
-      paymentVerified: false,
-      utrNumber: '',
-      paymentProofPath: '',
-      paymentProofName: '',
-      rejectionReason: '',
-      courierName: '',
-      trackingId: '',
-      createdAt: nowIso,
-      updatedAt: nowIso,
-    } satisfies OrderRecord;
-  });
+  if (!createdOrder) {
+    throw new Error('Could not generate a unique order ID. Please try again.');
+  }
 
   return {
     order: createdOrder,
@@ -569,11 +646,10 @@ export async function submitPaymentProofHybrid(
     }
   } catch (err) {
     if (!apiUpdatedOrder) {
-      throw new Error(
-        err instanceof Error && err.message.includes('PERMISSION_DENIED')
-          ? 'This order already has a finalized payment status and cannot be modified.'
-          : 'Could not save payment proof. Please try again.'
-      );
+      if (isPermissionDeniedError(err)) {
+        handleFirestoreError(err, OperationType.UPDATE, `orders/${order.orderId}`);
+      }
+      throw new Error('Could not save payment proof. Please try again.');
     }
   }
 
@@ -610,28 +686,35 @@ export async function trackOrderHybrid(cleanOrderId: string): Promise<OrderTrack
   }
 
   // 2. Non-PII public lookup in Firestore orderTracking/{orderId}
-  const snap = await getDoc(doc(db, 'orderTracking', cleanOrderId));
-  if (!snap.exists()) return null;
-  const d = snap.data() as Record<string, unknown>;
-  const status = (d.status as OrderStatus) || 'PENDING_VERIFICATION';
-  return {
-    orderId: String(d.orderId || cleanOrderId),
-    createdAt: timestampToIso(d.createdAt),
-    updatedAt: timestampToIso(d.updatedAt),
-    status,
-    paymentVerified: Boolean(d.paymentVerified),
-    paymentStatus: String(d.paymentStatus || ''),
-    orderStatus: String(d.orderStatus || ''),
-    shippingStatus: String(d.shippingStatus || ''),
-    courierName: String(d.courierName || ''),
-    trackingId: String(d.trackingId || ''),
-    rejectionReason: String(d.rejectionReason || ''),
-    productTitle: String(d.productTitle || DEFAULT_PRODUCT.title),
-    quantity: Number(d.quantity || 1),
-    subtotalInr: Number(d.subtotalInr || 0),
-    deliveryChargeInr: Number(d.deliveryChargeInr || 0),
-    totalInr: Number(d.totalInr || 0),
-  };
+  try {
+    const snap = await getDoc(doc(db, 'orderTracking', cleanOrderId));
+    if (!snap.exists()) return null;
+    const d = snap.data() as Record<string, unknown>;
+    const status = (d.status as OrderStatus) || 'PENDING_VERIFICATION';
+    return {
+      orderId: String(d.orderId || cleanOrderId),
+      createdAt: timestampToIso(d.createdAt),
+      updatedAt: timestampToIso(d.updatedAt),
+      status,
+      paymentVerified: Boolean(d.paymentVerified),
+      paymentStatus: String(d.paymentStatus || ''),
+      orderStatus: String(d.orderStatus || ''),
+      shippingStatus: String(d.shippingStatus || ''),
+      courierName: String(d.courierName || ''),
+      trackingId: String(d.trackingId || ''),
+      rejectionReason: String(d.rejectionReason || ''),
+      productTitle: String(d.productTitle || DEFAULT_PRODUCT.title),
+      quantity: Number(d.quantity || 1),
+      subtotalInr: Number(d.subtotalInr || 0),
+      deliveryChargeInr: Number(d.deliveryChargeInr || 0),
+      totalInr: Number(d.totalInr || 0),
+    };
+  } catch (err) {
+    if (isPermissionDeniedError(err)) {
+      handleFirestoreError(err, OperationType.GET, `orderTracking/${cleanOrderId}`);
+    }
+    throw err;
+  }
 }
 
 export async function submitReviewHybrid(params: {
@@ -671,16 +754,23 @@ export async function submitReviewHybrid(params: {
   }
 
   const reviewId = `REV-${Date.now().toString(36).toUpperCase()}`;
-  await setDoc(doc(db, 'reviews', reviewId), {
-    id: reviewId,
-    orderId: params.orderId,
-    customerName: 'Verified Buyer',
-    rating: params.rating,
-    comment: params.comment.trim(),
-    verifiedPurchase: true,
-    approved: false,
-    createdAt: serverTimestamp(),
-  });
+  try {
+    await setDoc(doc(db, 'reviews', reviewId), {
+      id: reviewId,
+      orderId: params.orderId,
+      customerName: 'Verified Buyer',
+      rating: params.rating,
+      comment: params.comment.trim(),
+      verifiedPurchase: true,
+      approved: false,
+      createdAt: serverTimestamp(),
+    });
+  } catch (err) {
+    if (isPermissionDeniedError(err)) {
+      handleFirestoreError(err, OperationType.CREATE, `reviews/${reviewId}`);
+    }
+    throw err;
+  }
   return 'Thank you! Your verified review has been submitted for admin approval.';
 }
 

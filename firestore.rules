@@ -391,7 +391,7 @@ service cloud.firestore {
         && counterId.matches('^orders_[0-9]{8}$')
         && isValidCounter(incoming())
         && incoming().id == counterId
-        && incoming().seq == 1
+        && (isAdmin() || incoming().seq == 1)
         && incoming().updatedAt == request.time;
       allow update: if isValidId(counterId)
         && counterId.matches('^orders_[0-9]{8}$')

@@ -121,7 +121,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
   const seedMissingOrdersToFirestore = useCallback(
     async (
       currentUser: User,
-      expressOrders: OrderRecord[],
+      allOrders: OrderRecord[],
       existingFsIds: Set<string>,
       product: ProductData,
       settings: StorefrontSettings
@@ -165,47 +165,96 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
         // Non-fatal seeding
       }
 
-      for (const ord of expressOrders.slice(0, 20)) {
-        if (existingFsIds.has(ord.orderId)) continue;
+      // Sync missing /orders & /orderTracking documents (including legacy orders)
+      for (const ord of allOrders.slice(0, 40)) {
         try {
+          const orderMissing = !existingFsIds.has(ord.orderId);
+          const trackingRef = doc(db, 'orderTracking', ord.orderId);
+          const trackingSnap = await getDoc(trackingRef);
+          const trackingMissing = !trackingSnap.exists();
+          if (!orderMissing && !trackingMissing) continue;
+
           const batch = writeBatch(db);
-          batch.set(doc(db, 'orders', ord.orderId), {
-            orderId: ord.orderId,
-            customerUid: ord.customerUid || 'guest',
-            customerName: ord.customerName,
-            phone: ord.phone,
-            state: ord.state,
-            city: ord.city,
-            pinCode: ord.pinCode,
-            address: ord.address,
-            landmark: ord.landmark || '',
-            productId: ord.productId,
-            productTitle: ord.productTitle,
-            unitPriceInr: ord.unitPriceInr,
-            quantity: ord.quantity,
-            subtotalInr: ord.subtotalInr,
-            deliveryChargeInr: ord.deliveryChargeInr,
-            totalInr: ord.totalInr,
-            status: ord.status,
-            paymentVerified: ord.paymentVerified,
-            utrNumber: ord.utrNumber || '',
-            paymentProofPath: ord.paymentProofPath || '',
-            paymentProofName: ord.paymentProofName || '',
-            rejectionReason: ord.rejectionReason || '',
-            courierName: ord.courierName || '',
-            trackingId: ord.trackingId || '',
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
-          batch.set(doc(db, 'orderTracking', ord.orderId), {
-            ...toTrackingInfo(ord),
-            createdAt: serverTimestamp(),
-            updatedAt: serverTimestamp(),
-          });
+          if (orderMissing) {
+            batch.set(doc(db, 'orders', ord.orderId), {
+              orderId: ord.orderId,
+              customerUid: ord.customerUid || 'guest',
+              customerName: ord.customerName,
+              phone: ord.phone,
+              state: ord.state,
+              city: ord.city,
+              pinCode: ord.pinCode,
+              address: ord.address,
+              landmark: ord.landmark || '',
+              productId: ord.productId,
+              productTitle: ord.productTitle,
+              unitPriceInr: ord.unitPriceInr,
+              quantity: ord.quantity,
+              subtotalInr: ord.subtotalInr,
+              deliveryChargeInr: ord.deliveryChargeInr,
+              totalInr: ord.totalInr,
+              status: ord.status,
+              paymentVerified: ord.paymentVerified,
+              utrNumber: ord.utrNumber || '',
+              paymentProofPath: ord.paymentProofPath || '',
+              paymentProofName: ord.paymentProofName || '',
+              rejectionReason: ord.rejectionReason || '',
+              courierName: ord.courierName || '',
+              trackingId: ord.trackingId || '',
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
+          if (trackingMissing) {
+            batch.set(trackingRef, {
+              ...toTrackingInfo(ord),
+              createdAt: serverTimestamp(),
+              updatedAt: serverTimestamp(),
+            });
+          }
           await batch.commit();
         } catch {
           // Continue remaining seeds
         }
+      }
+
+      // Ensure today's counter reflects at least the highest existing sequence number
+      try {
+        const todayStamp = new Date().toISOString().slice(0, 10).replace(/-/g, '');
+        const counterId = `orders_${todayStamp}`;
+        const prefix = `SSI-${todayStamp}-`;
+        let maxSeqToday = 0;
+        for (const ord of allOrders) {
+          if (ord.orderId.startsWith(prefix)) {
+            const seqPart = Number(ord.orderId.slice(prefix.length).split('-')[0]);
+            if (Number.isInteger(seqPart) && seqPart > maxSeqToday) {
+              maxSeqToday = seqPart;
+            }
+          }
+        }
+        if (maxSeqToday > 0) {
+          const counterRef = doc(db, 'counters', counterId);
+          const counterSnap = await getDoc(counterRef);
+          const existingSeq = counterSnap.exists() ? Number(counterSnap.data().seq || 0) : 0;
+          if (!counterSnap.exists()) {
+            await setDoc(counterRef, {
+              id: counterId,
+              seq: maxSeqToday,
+              updatedAt: serverTimestamp(),
+            });
+          } else if (maxSeqToday > existingSeq) {
+            await setDoc(
+              counterRef,
+              {
+                seq: maxSeqToday,
+                updatedAt: serverTimestamp(),
+              },
+              { merge: true }
+            );
+          }
+        }
+      } catch {
+        // Non-fatal counter sync
       }
     },
     []
@@ -401,7 +450,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
 
         void seedMissingOrdersToFirestore(
           currentUser,
-          expressOrders,
+          mergedOrders,
           fsOrderIds,
           activeProduct,
           activeSettings
@@ -654,7 +703,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
       const orderRef = doc(db, 'orders', orderId);
       const trackingRef = doc(db, 'orderTracking', orderId);
       const trackingInfo = toTrackingInfo(updatedOrder);
-      const orderSnap = await getDoc(orderRef);
+      const [orderSnap, trackingSnap] = await Promise.all([
+        getDoc(orderRef),
+        getDoc(trackingRef),
+      ]);
 
       const batch = writeBatch(db);
       if (orderSnap.exists()) {
@@ -664,17 +716,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
           rejectionReason: updatedOrder.rejectionReason || '',
           courierName: updatedOrder.courierName || '',
           trackingId: updatedOrder.trackingId || '',
-          updatedAt: serverTimestamp(),
-        });
-        batch.update(trackingRef, {
-          status: trackingInfo.status,
-          paymentVerified: trackingInfo.paymentVerified,
-          paymentStatus: trackingInfo.paymentStatus,
-          orderStatus: trackingInfo.orderStatus,
-          shippingStatus: trackingInfo.shippingStatus,
-          courierName: trackingInfo.courierName,
-          trackingId: trackingInfo.trackingId,
-          rejectionReason: trackingInfo.rejectionReason,
           updatedAt: serverTimestamp(),
         });
       } else {
@@ -706,6 +747,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ onStorefrontUpda
           createdAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         });
+      }
+
+      if (trackingSnap.exists()) {
+        batch.update(trackingRef, {
+          status: trackingInfo.status,
+          paymentVerified: trackingInfo.paymentVerified,
+          paymentStatus: trackingInfo.paymentStatus,
+          orderStatus: trackingInfo.orderStatus,
+          shippingStatus: trackingInfo.shippingStatus,
+          courierName: trackingInfo.courierName,
+          trackingId: trackingInfo.trackingId,
+          rejectionReason: trackingInfo.rejectionReason,
+          updatedAt: serverTimestamp(),
+        });
+      } else {
         batch.set(trackingRef, {
           ...trackingInfo,
           createdAt: serverTimestamp(),

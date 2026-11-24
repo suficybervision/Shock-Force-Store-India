@@ -10,7 +10,7 @@ import {
 } from '../types/store';
 import { TRANSLATIONS } from '../i18n/translations';
 import { UpiQrCode } from './UpiQrCode';
-import { submitPaymentProofHybrid } from '../lib/orderService';
+import { formatUserFriendlyError, submitPaymentProofHybrid } from '../lib/orderService';
 
 interface PaymentViewProps {
   order: OrderRecord;
@@ -122,9 +122,10 @@ export const PaymentView: React.FC<PaymentViewProps> = ({
       onProofSubmitted(updatedOrder);
     } catch (err) {
       setErrorMsg(
-        err instanceof Error && err.message
-          ? err.message
-          : 'Could not upload payment proof. Please check your file and UTR.'
+        formatUserFriendlyError(
+          err,
+          'Could not upload payment proof. Please check your UTR and screenshot and try again.'
+        )
       );
       setSubmitting(false);
     }
